@@ -4,13 +4,15 @@ from enum import StrEnum
 from typing import Any
 
 from jinja2 import Environment
-from pydantic import Field, Json, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from contentctl.objects.config import build
 from contentctl.objects.enums import ContentStatus
 from contentctl.objects.security_content_object import SecurityContentObject
+import xml.etree.ElementTree as ET
 
-DEFAULT_DASHBOARD_JINJA2_TEMPLATE = """<dashboard version="2" theme="{{ dashboard.theme }}">
+DEFAULT_DASHBOARD_JINJA2_TEMPLATE = """{% if dashboard.version != 1 %}
+<dashboard version="2" theme="{{ dashboard.theme }}">
     <label>{{ dashboard.name }}</label>
     <description></description>
     <definition><![CDATA[
@@ -18,12 +20,13 @@ DEFAULT_DASHBOARD_JINJA2_TEMPLATE = """<dashboard version="2" theme="{{ dashboar
     ]]></definition>
     <meta type="hiddenElements"><![CDATA[
 {
-	"hideEdit": false,
-	"hideOpenInSearch": false,
-	"hideExport": false
+    "hideEdit": false,
+    "hideOpenInSearch": false,
+    "hideExport": false
 }
     ]]></meta>
-</dashboard>"""
+</dashboard>
+{% endif %}"""
 
 
 class DashboardTheme(StrEnum):
@@ -46,9 +49,10 @@ class Dashboard(SecurityContentObject):
         default=DashboardTheme.light,
         description="The theme of the dashboard. Choose between 'light' and 'dark'.",
     )
-    json_obj: Json[dict[str, Any]] = Field(
-        ..., description="Valid JSON object that describes the dashboard"
+    json_obj: dict[str, Any] | None = Field(
+        default=None, description="Valid JSON object that describes the dashboard"
     )
+    raw_xml: str | None = Field(default=None, description="Raw XML dashboard content")
     status: ContentStatus = ContentStatus.production
 
     @field_validator("status", mode="after")
@@ -71,65 +75,84 @@ class Dashboard(SecurityContentObject):
             raise ValueError("File name not passed to dashboard constructor")
         yml_file_path = pathlib.Path(yml_file_name)
         json_file_path = yml_file_path.with_suffix(".json")
+        xml_file_path = yml_file_path.with_suffix(".xml")
 
-        if not json_file_path.is_file():
-            raise ValueError(f"Required file {json_file_path} does not exist.")
+        if not json_file_path.is_file() and not xml_file_path.is_file():
+            raise ValueError(f"Required file {json_file_path} or {xml_file_path} does not exist.")
 
-        with open(json_file_path, "r") as jsonFilePointer:
+        if json_file_path.is_file():
+            with open(json_file_path, "r") as jsonFilePointer:
+                try:
+                    json_obj: dict[str, Any] = json.load(jsonFilePointer)
+                except Exception as e:
+                    raise ValueError(f"Unable to load data from {json_file_path}: {e!s}")
+
+            name_from_file = data.get("name", None)
+            name_from_json = json_obj.get("title", None)
+
+            errors: list[str] = []
+            if name_from_json is None:
+                errors.append(f"'title' field is missing from {json_file_path}")
+            elif name_from_json != name_from_file:
+                errors.append(
+                    f"The 'title' field in the JSON file [{json_file_path}] does not match the 'name' field in the YML object [{yml_file_path}]. These two MUST match:\n    "
+                    f"title in JSON : {name_from_json}\n    "
+                    f"title in YML  : {name_from_file}\n    "
+                )
+
+            description_from_json = json_obj.get("description", None)
+            if description_from_json is None:
+                errors.append("'description' field is missing from field 'json_object'")
+
+            if len(errors) > 0:
+                err_string = "\n  - ".join(errors)
+                raise ValueError(f"Error(s) validating dashboard:\n  - {err_string}")
+
+            data["name"] = name_from_file
+            data["json_obj"] = json_obj
+            data["raw_xml"] = None
+            return data
+
+        if xml_file_path.is_file():
             try:
-                json_obj: dict[str, Any] = json.load(jsonFilePointer)
+                with open(xml_file_path, "r", encoding="utf-8") as xf:
+                    xml_text = xf.read()
+                ET.fromstring(xml_text)
             except Exception as e:
-                raise ValueError(f"Unable to load data from {json_file_path}: {e!s}")
+                raise ValueError(f"Unable to load data from {xml_file_path}: {e!s}")
+            data["raw_xml"] = xml_text
+            data["json_obj"] = None
+            return data
 
-        name_from_file = data.get("name", None)
-        name_from_json = json_obj.get("title", None)
-
-        errors: list[str] = []
-        if name_from_json is None:
-            errors.append(f"'title' field is missing from {json_file_path}")
-        elif name_from_json != name_from_file:
-            errors.append(
-                f"The 'title' field in the JSON file [{json_file_path}] does not match the 'name' field in the YML object [{yml_file_path}]. These two MUST match:\n    "
-                f"title in JSON : {name_from_json}\n    "
-                f"title in YML  : {name_from_file}\n    "
-            )
-
-        description_from_json = json_obj.get("description", None)
-        if description_from_json is None:
-            errors.append("'description' field is missing from field 'json_object'")
-
-        if len(errors) > 0:
-            err_string = "\n  - ".join(errors)
-            raise ValueError(f"Error(s) validating dashboard:\n  - {err_string}")
-
-        data["name"] = name_from_file
-        data["json_obj"] = json.dumps(json_obj)
         return data
 
     def pretty_print_json_obj(self):
-        return json.dumps(self.json_obj, indent=4)
+        return json.dumps(self.json_obj, indent=4) if self.json_obj is not None else ""
 
     def getOutputFilepathRelativeToAppRoot(self, config: build) -> pathlib.Path:
         if self.file_path is None:
             raise FileNotFoundError(
                 f"Dashboard {self.name} file_path was None. Dashboards must be backed by a file."
             )
-        # Prefix with the appLabel__ in order to make a search for these easy with match="__"
-        # in the default.xml file
         filename = f"{config.app.label}__{self.file_path.stem}.xml".lower().replace(
             " ", "_"
         )
-
         return pathlib.Path("default/data/ui/views") / filename
 
     def writeDashboardFile(self, j2_env: Environment, config: build):
-        template = j2_env.from_string(self.j2_template)
-        dashboard_text = template.render(config=config, dashboard=self)
+        if self.version == 1 and self.raw_xml:
+            dashboard_text = self.raw_xml
+        elif self.raw_xml:
+            dashboard_text = self.raw_xml
+        else:
+            template = j2_env.from_string(self.j2_template)
+            dashboard_text = template.render(config=config, dashboard=self)
 
         with open(
-            config.getPackageDirectoryPath()
-            / self.getOutputFilepathRelativeToAppRoot(config),
-            "a",
+                config.getPackageDirectoryPath()
+                / self.getOutputFilepathRelativeToAppRoot(config),
+                "a",
         ) as f:
             output_xml = dashboard_text.encode("utf-8", "ignore").decode("utf-8")
             f.write(output_xml)
+
