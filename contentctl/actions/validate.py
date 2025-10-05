@@ -78,7 +78,7 @@ class Validate:
         # Get all of the mlmodel and csv files in the lookups directory
         csvAndMlmodelFiles = Utils.get_security_content_files_from_directory(
             lookupsDirectory,
-            allowedFileExtensions=[".yml", ".csv", ".mlmodel"],
+            allowedFileExtensions=[".yml", ".csv", ".mlmodel", ".gitkeep"],
             fileExtensionsToReturn=[".csv", ".mlmodel"],
         )
 
