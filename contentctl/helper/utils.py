@@ -67,7 +67,9 @@ class Utils:
         erroneousFiles: list[pathlib.Path] = []
         # Get every single file extension
         for filePath in path.glob("**/*.*"):
-            if filePath.suffix in allowedFileExtensions:
+            if filePath.name == ".gitkeep":
+                allowedFiles.append(filePath)
+            elif filePath.suffix in allowedFileExtensions:
                 # Yes these are allowed
                 allowedFiles.append(filePath)
             else:
